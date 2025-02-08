@@ -85,6 +85,10 @@ uint16_t createFrame(uint8_t *buffer, const Frame *frame) {
     }
 
     // Oblicz CRC
+
+    /*
+    * CRC LICZYSZ OD NADAWCY DO KOŃCA DANYCH A NIE TYLKO Z DANYCH 
+    */
     uint16_t crc = calculateCRC(frame->data, frame->length);
 
     // Dodaj CRC jako surowe bajty w formacie big endian
@@ -98,22 +102,22 @@ uint16_t createFrame(uint8_t *buffer, const Frame *frame) {
 }
 
 // Funkcja dekodująca ramkę
-int decodeFrame(const uint8_t *buffer, uint16_t length, Frame *frame) {
+int decodeFrame(FrameState *frameState, uint16_t length, Frame *frame) {
     // Sprawdź minimalną długość przed odczytem
-    if (length < 9) return 0;  // Przenieść na początek funkcji
+    if (length < MIN_FRAME_LEN) return 0;  // Przenieść na początek funkcji
     
     // Sprawdź znak początku
-    if (buffer[0] != FRAME_START) return 0;
+    if (frameState->bx[0] != FRAME_START) return 0;
     
     // Odczyt adresów
-    frame->sourceAddress[0] = buffer[1];
-    frame->sourceAddress[1] = buffer[2];
-    frame->destinationAddress[0] = buffer[3];
-    frame->destinationAddress[1] = buffer[4];
-    frame->length = buffer[5];
+    frame->sourceAddress[0] = frameState->bx[1];
+    frame->sourceAddress[1] = frameState->bx[2];
+    frame->destinationAddress[0] = frameState->bx[3];
+    frame->destinationAddress[1] = frameState->bx[4];
+    frame->length = frameState->bx[5];
     
     // Sprawdź długość
-    if (frame->length > MAX_DATA_LEN || frame->length > (length - 9)) {
+    if (frame->length > MAX_DATA_LEN || frame->length > (length - MIN_FRAME_LEN)) {
         return 0;
     }
     
@@ -121,8 +125,8 @@ int decodeFrame(const uint8_t *buffer, uint16_t length, Frame *frame) {
     
     // Kopiowanie danych z dekodowaniem byte stuffingu - ZŁY POCZĄTKOWY INDEKS!
     for (uint16_t i = 6; i < length - 3 && dataIndex < frame->length; i++) {
-        if (buffer[i] == ESCAPE_CHAR) {
-            switch (buffer[++i]) {  // Najpierw inkrementuj i, potem użyj
+        if (frameState->bx[i] == ESCAPE_CHAR) {
+            switch (frameState->bx[++i]) {  // Najpierw inkrementuj i, potem użyj
                 case FRAME_START_STUFF:
                     frame->data[dataIndex++] = FRAME_START;
                     break;
@@ -136,7 +140,7 @@ int decodeFrame(const uint8_t *buffer, uint16_t length, Frame *frame) {
                     return 0; // Błędna sekwencja escape
             }
         } else {
-            frame->data[dataIndex++] = buffer[i];
+            frame->data[dataIndex++] = frameState->bx[i];
         }
     }
     
@@ -146,9 +150,9 @@ int decodeFrame(const uint8_t *buffer, uint16_t length, Frame *frame) {
     }
     
     // Odczyt CRC (2 bajty, big endian)
-    if (length < 9) return 0;  // Minimalna długość ramki
-    frame->crc = (buffer[length - 3] << 8) | buffer[length - 2];
-    if (buffer[length - 1] != FRAME_END) return 0;  // Sprawdź końcowy znak
+    if (length < MIN_FRAME_LEN) return 0;  // Minimalna długość ramki
+    frame->crc = (frameState->bx[length - 3] << 8) | frameState->bx[length - 2];
+    if (frameState->bx[length - 1] != FRAME_END) return 0;  // Sprawdź końcowy znak
     
     // Weryfikacja CRC
     uint16_t calculatedCRC = calculateCRC(frame->data, frame->length);

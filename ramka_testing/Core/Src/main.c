@@ -50,8 +50,8 @@ UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 
-#define USART_TXBUF_LEN 1024 // Bufor nadawczy
-#define USART_RXBUF_LEN 512 // Bufor odbiorczy
+#define USART_TXBUF_LEN 3072 // Bufor nadawczy
+#define USART_RXBUF_LEN 1024 // Bufor odbiorczy
 uint8_t USART_TxBuf[USART_TXBUF_LEN];
 uint8_t USART_RxBuf[USART_RXBUF_LEN];
 
@@ -204,7 +204,11 @@ void processCommand(Frame *frame) {
     if (memcmp(frame->data, "GET", 3) == 0) {
         char *endptr;
         uint16_t requestedCount = (uint16_t)strtol((char *)&frame->data[3], &endptr, 10);
-        if (*endptr != '\0') {  // Sprawdzenie poprawności konwersji
+        /*
+        * ZA TO BĘDZIE KARA DOŻYWOCIA, WIEM ŻE TO NA CHWILĘ ALE NIGDZIE TAK TEGO NIE SPRAWDZAJ
+        * BO TY POZWALASZ WYSYŁAĆ DOWOLNE DANE CZYLI NULLA TEŻ
+        */
+        if (*endptr != '\0') {  // Sprawdzenie poprawności konwersji 
             sendResponse("FAL");
             return;
         }
@@ -270,11 +274,9 @@ void processReceivedChar(uint8_t receivedChar) {
         if (frameState.inFrame) {
             Frame decodedFrame;
             // Używamy bufora UART zamiast frameState.bx
-            if (decodeFrame(USART_RxBuf + USART_RX_Busy, frameState.bxIndex, &decodedFrame)) {
+            if (decodeFrame(&frameState, frameState.bxIndex, &decodedFrame)) {
                 sendStatus(ERR_GOOD);
                 processCommand(&decodedFrame);
-            } else {
-                sendStatus(ERR_FAIL);
             }
             resetFrameState();
         }
@@ -283,16 +285,15 @@ void processReceivedChar(uint8_t receivedChar) {
         if (frameState.bxIndex <= MAX_FRAME_WITHOUT_STUFFING * 2) {
             if (frameState.escapeDetected) {
                 if (receivedChar == FRAME_START_STUFF) {
-                    USART_RxBuf[USART_RX_Busy + frameState.bxIndex++] = FRAME_START;
+                    frameState.bx[frameState.bxIndex++] = FRAME_START;
                 } 
                 else if (receivedChar == ESCAPE_CHAR_STUFF) {
-                    USART_RxBuf[USART_RX_Busy + frameState.bxIndex++] = ESCAPE_CHAR;
+                    frameState.bx[frameState.bxIndex++]  = ESCAPE_CHAR;
                 } 
                 else if (receivedChar == FRAME_END_STUFF) {
-                    USART_RxBuf[USART_RX_Busy + frameState.bxIndex++] = FRAME_END;
+                    frameState.bx[frameState.bxIndex++]  = FRAME_END;
                 } 
                 else {
-                    sendStatus(ERR_FAIL);
                     resetFrameState();
                 }
                 frameState.escapeDetected = false;
@@ -301,8 +302,8 @@ void processReceivedChar(uint8_t receivedChar) {
                 frameState.escapeDetected = true;
             } 
             else {
-                if (USART_RX_Busy + frameState.bxIndex < USART_RXBUF_LEN) {
-                    USART_RxBuf[USART_RX_Busy + frameState.bxIndex++] = receivedChar;
+                if (frameState.bxIndex < MAX_FRAME_WITHOUT_STUFFING) {
+                    frameState.bx[frameState.bxIndex++]  = receivedChar;
                 } else {
                     resetFrameState();
                 }

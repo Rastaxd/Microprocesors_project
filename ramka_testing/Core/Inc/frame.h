@@ -22,8 +22,11 @@
 #define FRAME_END_STUFF    0x5C  // '\' dla |
 #define ESCAPE_CHAR_STUFF  0x5D  // ']' dla }
 
-#define MAX_DATA_LEN  255   // Maksymalna długość danych
-#define MAX_FRAME_WITHOUT_STUFFING 135
+
+
+#define MIN_FRAME_LEN 9     // Minimalna długość ramki
+#define MAX_DATA_LEN  255   // Maksymalna długość danych (?)
+#define MAX_FRAME_WITHOUT_STUFFING 512 // (?)
 #define MAX_FRAME_BUFFER_SIZE (MAX_FRAME_WITHOUT_STUFFING * 2)  // Maksymalny rozmiar z byte stuffingiem
 #define ERR_GOOD 0
 #define ERR_FAIL 1
@@ -44,7 +47,7 @@ typedef struct {
 typedef struct {
     bool inFrame;
     bool escapeDetected;
-    uint8_t bx[MAX_FRAME_WITHOUT_STUFFING * 2];
+    uint8_t bx[MAX_FRAME_WITHOUT_STUFFING];
     uint16_t bxIndex;
 } FrameState;
 

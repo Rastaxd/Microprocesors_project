@@ -44,8 +44,8 @@ uint16_t calculateCRC(const uint8_t *data, uint16_t length) {
     		0x41B6, 0x2ED5, 0x9F70, 0xF013,   0x9359, 0xFC3A, 0x4D9F, 0x22FC
     };
 
-    uint16_t crc = 0xFFFF; // Początkowa wartość CRC
-
+    uint16_t crc = 0xFFFF; // Dodać tę linię - inicjalizacja CRC
+    
     for (uint16_t i = 0; i < length; i++) {
         uint8_t index = (crc >> 8) ^ data[i]; // XOR bieżącego bajtu z górnymi 8 bitami CRC
         crc = (crc << 8) ^ CRC_TABLE[index];  // Aktualizacja CRC
@@ -58,70 +58,104 @@ uint16_t calculateCRC(const uint8_t *data, uint16_t length) {
 uint16_t createFrame(uint8_t *buffer, const Frame *frame) {
     uint16_t index = 0;
 
-    // Dodaj SYNCHRO_START
-    buffer[index++] = SYNCHRO_START;
+    // Znak początku
+    buffer[index++] = FRAME_START;
 
-    // Dodaj adres
-    buffer[index++] = frame->address;
+    // Adres nadawcy (2 znaki)
+    buffer[index++] = frame->sourceAddress[0];
+    buffer[index++] = frame->sourceAddress[1];
 
-    // Dodaj długość w HEX (MSB, LSB)
-    buffer[index++] = (frame->length >> 8) & 0xFF;
-    buffer[index++] = frame->length & 0xFF;
+    // Adres odbiorcy (2 znaki)
+    buffer[index++] = frame->destinationAddress[0];
+    buffer[index++] = frame->destinationAddress[1];
 
-    // Dodaj dane z byte stuffing
+    // Długość
+    buffer[index++] = frame->length;
+
+    // Dodaj dane (ASCII)
     for (uint16_t i = 0; i < frame->length; i++) {
-        if (frame->data[i] == SYNCHRO_START || frame->data[i] == SYNCHRO_END || frame->data[i] == ESCAPE_BYTE) {
-            buffer[index++] = ESCAPE_BYTE;
-            buffer[index++] = frame->data[i] ^ 0x20;
+        if (frame->data[i] == FRAME_START || 
+            frame->data[i] == FRAME_END || 
+            frame->data[i] == ESCAPE_CHAR) {
+            buffer[index++] = ESCAPE_CHAR;
+            buffer[index++] = frame->data[i] ^ 0x20;  // Byte stuffing
         } else {
             buffer[index++] = frame->data[i];
         }
     }
 
-    // Oblicz CRC przed byte stuffing
+    // Oblicz CRC
     uint16_t crc = calculateCRC(frame->data, frame->length);
 
-    // Dodaj CRC w Big Endian
-    buffer[index++] = (crc >> 8) & 0xFF;
-    buffer[index++] = crc & 0xFF;
+    // Dodaj CRC jako surowe bajty w formacie big endian
+    buffer[index++] = (crc >> 8) & 0xFF;  // Starszy bajt
+    buffer[index++] = crc & 0xFF;         // Młodszy bajt
 
-    // Dodaj SYNCHRO_END
-    buffer[index++] = SYNCHRO_END;
+    // Dodaj FRAME_END (hex)
+    buffer[index++] = FRAME_END; // 0x7C
 
     return index;
 }
 
-
-
 // Funkcja dekodująca ramkę
 int decodeFrame(const uint8_t *buffer, uint16_t length, Frame *frame) {
-    // Sprawdź znaki synchronizacji
-    if (buffer[0] != SYNCHRO_START || buffer[length - 1] != SYNCHRO_END) {
-        return -1; // Błąd synchronizacji
+    // Sprawdź minimalną długość przed odczytem
+    if (length < 9) return 0;  // Przenieść na początek funkcji
+    
+    // Sprawdź znak początku
+    if (buffer[0] != FRAME_START) return 0;
+    
+    // Odczyt adresów
+    frame->sourceAddress[0] = buffer[1];
+    frame->sourceAddress[1] = buffer[2];
+    frame->destinationAddress[0] = buffer[3];
+    frame->destinationAddress[1] = buffer[4];
+    frame->length = buffer[5];
+    
+    // Sprawdź długość
+    if (frame->length > MAX_DATA_LEN || frame->length > (length - 9)) {
+        return 0;
     }
-
-    // Odczytaj adres
-    frame->address = buffer[1];
-
-    // Odczytaj długość danych
-    frame->length = buffer[2];
-
-    // Dekoduj dane z byte stuffing
-    uint8_t dataIndex = 0;
-    for (uint16_t i = 3; i < length - 4; i++) { // Dane do CRC
-        if (buffer[i] == ESCAPE_BYTE) {
-            frame->data[dataIndex++] = buffer[++i] ^ 0x20; // Usuń byte stuffing
+    
+    uint16_t dataIndex = 0;
+    
+    // Kopiowanie danych z dekodowaniem byte stuffingu - ZŁY POCZĄTKOWY INDEKS!
+    for (uint16_t i = 6; i < length - 3 && dataIndex < frame->length; i++) {
+        if (buffer[i] == ESCAPE_CHAR) {
+            switch (buffer[++i]) {  // Najpierw inkrementuj i, potem użyj
+                case FRAME_START_STUFF:
+                    frame->data[dataIndex++] = FRAME_START;
+                    break;
+                case FRAME_END_STUFF:
+                    frame->data[dataIndex++] = FRAME_END;
+                    break;
+                case ESCAPE_CHAR_STUFF:
+                    frame->data[dataIndex++] = ESCAPE_CHAR;
+                    break;
+                default:
+                    return 0; // Błędna sekwencja escape
+            }
         } else {
             frame->data[dataIndex++] = buffer[i];
         }
     }
-
-    // Odczytaj CRC (Big Endian)
+    
+    // Sprawdź czy odczytano właściwą ilość danych
+    if (dataIndex != frame->length) {
+        return 0;
+    }
+    
+    // Odczyt CRC (2 bajty, big endian)
+    if (length < 9) return 0;  // Minimalna długość ramki
     frame->crc = (buffer[length - 3] << 8) | buffer[length - 2];
-
-    // Oblicz CRC
+    if (buffer[length - 1] != FRAME_END) return 0;  // Sprawdź końcowy znak
+    
+    // Weryfikacja CRC
     uint16_t calculatedCRC = calculateCRC(frame->data, frame->length);
-
-    return (calculatedCRC == frame->crc) ? 0 : -2; // Zwróć 0 = OK, -2 = Błąd CRC
+    if (calculatedCRC != frame->crc) {
+        return 0;
+    }
+    
+    return 1; // Sukces
 }
 

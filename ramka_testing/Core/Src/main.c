@@ -18,7 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-
+#include "frame.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <string.h>
@@ -50,7 +50,7 @@ UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 
-#define USART_TXBUF_LEN 1512 // Bufor nadawczy
+#define USART_TXBUF_LEN 1024 // Bufor nadawczy
 #define USART_RXBUF_LEN 512 // Bufor odbiorczy
 uint8_t USART_TxBuf[USART_TXBUF_LEN];
 uint8_t USART_RxBuf[USART_RXBUF_LEN];
@@ -65,8 +65,12 @@ __IO int USART_RX_Busy=0;
 
 // Bufor danych odebranych przez czujnik
 uint8_t sensorBuffer[SENSOR_BUFFER_SIZE];
-uint16_t sensorIndex = 0;
-uint8_t liveModeEnabled = 0; // Flaga trybu LIVEG
+volatile uint16_t sensorIndex = 0;
+volatile uint8_t liveModeEnabled = 0; // Flaga trybu LIVEG
+
+// Dodaj zmienne globalne
+static FrameState frameState;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -140,11 +144,11 @@ int processFrame(uint8_t *buffer, uint16_t length) {
     Frame frame;
     int result = decodeFrame(buffer, length, &frame);
 
-    if (result == 0) {
+    if (result == 1) {  // 1 oznacza sukces
         processCommand(&frame);
-        return 0; // Sukces
+        return ERR_GOOD;
     } else {
-        return -1; // Błąd synchronizacji lub CRC
+        return ERR_FAIL;
     }
 }
 
@@ -152,60 +156,71 @@ int processFrame(uint8_t *buffer, uint16_t length) {
 
 // Callback na Wyslanie
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart){
-   if(huart==&huart2){
-	   if(USART_TX_Empty!=USART_TX_Busy){
-		   uint8_t tmp=USART_TxBuf[USART_TX_Busy];
-		   USART_TX_Busy++;
-		   if(USART_TX_Busy >= USART_TXBUF_LEN)USART_TX_Busy=0;
-		   HAL_UART_Transmit_IT(&huart2, &tmp, 1);
-	   }
-   }
-}
-
-/*
-void sendResponse(const char *message) {
-    Frame responseFrame;
-    responseFrame.address = 'B'; // Adres docelowy (np. PC)
-    responseFrame.length = strlen(message);
-    memcpy(responseFrame.data, message, responseFrame.length);
-
-    uint8_t buffer[512];
-    uint16_t frameLength = createFrame(buffer, &responseFrame);
-    HAL_UART_Transmit(&huart2, buffer, frameLength, HAL_MAX_DELAY);
-}
-
-*/
-
-void sendResponse(const char *message) {
-    Frame responseFrame;
-    responseFrame.address = 'B'; // Adres docelowy
-    responseFrame.length = strlen(message);
-    memcpy(responseFrame.data, message, responseFrame.length);
-
-    uint8_t buffer[512];
-    uint16_t frameLength = createFrame(buffer, &responseFrame);
-
-  /* // Debuguj treść ramki przed wysłaniem
-    for (uint16_t i = 0; i < frameLength; i++) {
-        USART_fsend("%02X ", buffer[i]);
+  if(huart==&huart2){
+    if(USART_TX_Empty!=USART_TX_Busy){
+      uint8_t tmp=USART_TxBuf[USART_TX_Busy];
+      USART_TX_Busy++;
+      if(USART_TX_Busy >= USART_TXBUF_LEN)USART_TX_Busy=0;
+      HAL_UART_Transmit_IT(&huart2, &tmp, 1);
     }
-*/
+  }
+}
+
+void sendResponse(const char *message) {
+    if (!message || strlen(message) > MAX_DATA_LEN) {  // Dodanie sprawdzenia NULL
+        return;
+    }
+    Frame responseFrame;
+    // Zachowujemy dwuznakowe adresy
+    responseFrame.sourceAddress[0] = 'S';
+    responseFrame.sourceAddress[1] = 'T';
+    responseFrame.destinationAddress[0] = 'P';
+    responseFrame.destinationAddress[1] = 'C';
+    responseFrame.length = strlen(message);
+    memcpy(responseFrame.data, message, responseFrame.length);
+
+    uint8_t buffer[512];  // Stała wartość powinna być zdefiniowana jako makro
+    uint16_t frameLength = createFrame(buffer, &responseFrame);
     HAL_UART_Transmit(&huart2, buffer, frameLength, HAL_MAX_DELAY);
 }
 
 void processCommand(Frame *frame) {
+    if (!frame) {  // Dodanie sprawdzenia NULL
+        return;
+    }
+
+    // Sprawdź poprawność adresów
+    if (memcmp(&frame->sourceAddress, "PC", 2) != 0 || 
+        memcmp(&frame->destinationAddress, "ST", 2) != 0) {
+        sendResponse("FAL");
+        return;
+    }
+
     if (frame->length < 3) {
         sendResponse("FAL");
         return;
     }
 
     if (memcmp(frame->data, "GET", 3) == 0) {
-        uint16_t requestedCount = atoi((char *)&frame->data[3]);
+        char *endptr;
+        uint16_t requestedCount = (uint16_t)strtol((char *)&frame->data[3], &endptr, 10);
+        if (*endptr != '\0') {  // Sprawdzenie poprawności konwersji
+            sendResponse("FAL");
+            return;
+        }
         if (requestedCount > sensorIndex) {
             sendResponse("TMC"); // Za dużo danych
         } else {
+            // Dodać sprawdzenie przed kopiowaniem danych:
+            if (requestedCount > MAX_DATA_LEN) {
+                sendResponse("TMC");
+                return;
+            }
             Frame dataFrame;
-            dataFrame.address = 'B';
+            // Ustawiamy ST jako nadawcę odpowiedzi
+            memcpy(&dataFrame.sourceAddress, "ST", 2);
+            // Ustawiamy PC jako odbiorcę odpowiedzi
+            memcpy(&dataFrame.destinationAddress, "PC", 2);
             dataFrame.length = requestedCount;
             memcpy(dataFrame.data, &sensorBuffer[sensorIndex - requestedCount], requestedCount);
 
@@ -230,6 +245,73 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart){
 		 HAL_UART_Receive_IT(&huart2,&USART_RxBuf[USART_RX_Empty],1); // Kontynuacja odbioru
 
 	 }
+}
+
+void resetFrameState() {
+    frameState.inFrame = false;
+    frameState.escapeDetected = false;
+    frameState.bxIndex = 0;
+}
+
+void sendStatus(uint8_t status) {
+    if (status == ERR_GOOD) {
+        sendResponse("CPL");
+    } else {
+        sendResponse("FAL");
+    }
+}
+
+void processReceivedChar(uint8_t receivedChar) {
+    if (receivedChar == FRAME_START) {
+        resetFrameState();
+        frameState.inFrame = true;
+    } 
+    else if (receivedChar == FRAME_END && !frameState.escapeDetected) {
+        if (frameState.inFrame) {
+            Frame decodedFrame;
+            // Używamy bufora UART zamiast frameState.bx
+            if (decodeFrame(USART_RxBuf + USART_RX_Busy, frameState.bxIndex, &decodedFrame)) {
+                sendStatus(ERR_GOOD);
+                processCommand(&decodedFrame);
+            } else {
+                sendStatus(ERR_FAIL);
+            }
+            resetFrameState();
+        }
+    } 
+    else if (frameState.inFrame) {
+        if (frameState.bxIndex <= MAX_FRAME_WITHOUT_STUFFING * 2) {
+            if (frameState.escapeDetected) {
+                if (receivedChar == FRAME_START_STUFF) {
+                    USART_RxBuf[USART_RX_Busy + frameState.bxIndex++] = FRAME_START;
+                } 
+                else if (receivedChar == ESCAPE_CHAR_STUFF) {
+                    USART_RxBuf[USART_RX_Busy + frameState.bxIndex++] = ESCAPE_CHAR;
+                } 
+                else if (receivedChar == FRAME_END_STUFF) {
+                    USART_RxBuf[USART_RX_Busy + frameState.bxIndex++] = FRAME_END;
+                } 
+                else {
+                    sendStatus(ERR_FAIL);
+                    resetFrameState();
+                }
+                frameState.escapeDetected = false;
+            } 
+            else if (receivedChar == ESCAPE_CHAR) {
+                frameState.escapeDetected = true;
+            } 
+            else {
+                if (USART_RX_Busy + frameState.bxIndex < USART_RXBUF_LEN) {
+                    USART_RxBuf[USART_RX_Busy + frameState.bxIndex++] = receivedChar;
+                } else {
+                    resetFrameState();
+                }
+            }
+        } 
+        else {
+            resetFrameState();
+        }
+    }
 }
 
 /* USER CODE END 0 */
@@ -272,54 +354,15 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  	  	while (1) {
-	      // Sprawdzamy, czy w buforze są nowe dane
-	      if (USART_kbhit()) {
-	          // Obliczamy długość nowych danych w buforze kołowym
-	          uint16_t dataLen;
-	          if (USART_RX_Empty >= USART_RX_Busy)
-	              dataLen = USART_RX_Empty - USART_RX_Busy;
-	          else
-	              dataLen = (USART_RXBUF_LEN - USART_RX_Busy) + USART_RX_Empty;
-
-	          // Kopiujemy nowe dane do tymczasowego bufora
-	          uint8_t tempBuffer[512];
-	          uint16_t j = 0;
-	          uint16_t i = USART_RX_Busy;
-	          while (j < dataLen) {
-	              tempBuffer[j++] = USART_RxBuf[i];
-	              i = (i + 1) % USART_RXBUF_LEN;
-	          }
-
-	          // Szukamy początku i końca ramki w tempBuffer
-	          int16_t frameStart = -1, frameEnd = -1;
-	          for (i = 0; i < dataLen; i++) {
-	              if (tempBuffer[i] == SYNCHRO_START) {
-	                  frameStart = i;
-	                  break;
-	              }
-	          }
-	          if (frameStart >= 0) {
-	              for (i = frameStart; i < dataLen; i++) {
-	                  if (tempBuffer[i] == SYNCHRO_END) {
-	                      frameEnd = i;
-	                      break;
-	                  }
-	              }
-	          }
-
-	          if (frameStart >= 0 && frameEnd >= 0 && frameEnd > frameStart) {
-	              // Znaleziono kompletną ramkę – wywołaj processFrame
-	              int status = processFrame(&tempBuffer[frameStart], frameEnd - frameStart + 1);
-	              if (status < 0) {
-	                  sendResponse("FAL"); // Błąd ramki (np. CRC lub synchronizacja)
-	              }
-	              // Po przetworzeniu, ustaw wskaźnik odczytu na miejsce, gdzie zakończyły się przetworzone dane
-	              // (tutaj uproszczamy, zakładając, że cała zawartość bufora została przetworzona)
-	              USART_RX_Busy = USART_RX_Empty;
-	          }
-	      }
-	  }
+while (1) {
+    // Sprawdzamy, czy w buforze są nowe dane
+    if (USART_kbhit()) {
+        int16_t receivedChar = USART_getchar();
+        if (receivedChar != -1) {
+            processReceivedChar((uint8_t)receivedChar);
+        }
+    }
+}
 
 
 

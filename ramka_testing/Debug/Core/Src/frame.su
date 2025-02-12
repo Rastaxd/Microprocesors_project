@@ -1,3 +1,0 @@
-../Core/Src/frame.c:11:10:calculateCRC	24	static
-../Core/Src/frame.c:58:10:createFrame	24	static
-../Core/Src/frame.c:101:5:decodeFrame	32	static
